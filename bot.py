@@ -1,182 +1,145 @@
 import os
 import subprocess
-import threading
-import logging
+import sys
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-
-# إعداد التسجيل
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 BOT_TOKEN = "8523083737:AAEsO3w-fFbOLT8wRhaItPjb86xA1zEwaj0"
+ADMIN_ID = 7125289523
+active_bots = {}
 
-# مجلد التخزين
-UPLOAD_FOLDER = "user_files"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-# قاموس لتخزين العمليات النشطة
-active_processes = {}
+def is_admin(user_id):
+    return user_id == ADMIN_ID
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 **بوت استضافة ملفات بايثون**\n\n"
-        "📁 **الأوامر:**\n"
-        "/upload - رفع ملف بايثون\n"
-        "/list - عرض الملفات\n"
-        "/run <اسم الملف> - تشغيل ملف\n"
-        "/stop <اسم الملف> - إيقاف ملف\n"
-        "/delete <اسم الملف> - حذف ملف\n"
-        "/status - حالة الملفات النشطة"
-    )
+    if not is_admin(update.effective_user.id):
+        return
+    await update.message.reply_text("البوت جاهز للرفع")
 
-async def upload_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📤 أرسل ملف بايثون (.py) الآن:")
-
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    document = update.message.document
+async def run_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
     
-    if document.file_name.endswith('.py'):
-        # تحميل الملف
-        file = await context.bot.get_file(document.file_id)
-        file_path = os.path.join(UPLOAD_FOLDER, document.file_name)
-        
-        await file.download_to_drive(file_path)
-        await update.message.reply_text(f"✅ تم رفع الملف: {document.file_name}")
-    else:
-        await update.message.reply_text("❌ يرجى رفع ملف بايثون فقط (.py)")
-
-async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    files = [f for f in os.listdir(UPLOAD_FOLDER) if f.endswith('.py')]
-    
-    if files:
-        file_list = "\n".join(files)
-        await update.message.reply_text(f"📁 الملفات المتاحة:\n{file_list}")
-    else:
-        await update.message.reply_text("❌ لا توجد ملفات")
-
-async def run_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("❌ استخدم: /run <اسم الملف>")
-        return
-    
-    filename = context.args[0]
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
-    
-    if not os.path.exists(file_path):
-        await update.message.reply_text("❌ الملف غير موجود")
-        return
-    
-    if filename in active_processes:
-        await update.message.reply_text("⚠️ الملف يعمل بالفعل")
-        return
-    
-    # تشغيل الملف بدون وقت محدود
-    def run_script():
-        try:
-            process = subprocess.Popen(
-                ['python', file_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            active_processes[filename] = process
-            
-            # انتظار الانتهاء (بدون timeout)
-            stdout, stderr = process.communicate()
-            
-            # تسجيل النتيجة
-            if stdout:
-                logger.info(f"إخراج {filename}: {stdout[:1000]}")
-            if stderr:
-                logger.error(f"أخطاء {filename}: {stderr[:1000]}")
-                
-        except Exception as e:
-            logger.error(f"خطأ في {filename}: {e}")
-        finally:
-            # إزالة من القائمة عند الانتهاء
-            if filename in active_processes:
-                del active_processes[filename]
-    
-    thread = threading.Thread(target=run_script)
-    thread.daemon = True
-    thread.start()
-    
-    await update.message.reply_text(f"🚀 بدأ تشغيل: {filename}")
-
-async def stop_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("❌ استخدم: /stop <اسم الملف>")
+        await update.message.reply_text("يرجى تحديد اسم ملف البوت\nاستخدام: /run filename.py")
         return
     
     filename = context.args[0]
     
-    if filename in active_processes:
-        process = active_processes[filename]
-        try:
-            process.terminate()  # إيقاف العملية
-            process.wait(timeout=5)  # انتظار الإيقاف
-        except:
-            process.kill()  # إجبار الإيقاف إذا لم يستجب
-        
-        del active_processes[filename]
-        await update.message.reply_text(f"⏹️ تم إيقاف: {filename}")
-    else:
-        await update.message.reply_text("❌ الملف غير نشط")
-
-async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("❌ استخدم: /delete <اسم الملف>")
+    if not os.path.exists(filename):
+        await update.message.reply_text(f"الملف {filename} غير موجود")
         return
     
-    filename = context.args[0]
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    if filename in active_bots:
+        await update.message.reply_text(f"البوت {filename} يعمل بالفعل")
+        return
     
-    if os.path.exists(file_path):
-        # إيقاف الملف إذا كان نشطاً
-        if filename in active_processes:
-            await stop_file(update, context)
-        
-        os.remove(file_path)
-        await update.message.reply_text(f"🗑️ تم حذف: {filename}")
-    else:
-        await update.message.reply_text("❌ الملف غير موجود")
+    try:
+        process = subprocess.Popen([sys.executable, filename])
+        active_bots[filename] = process
+        await update.message.reply_text(f"تم تشغيل البوت: {filename}")
+    except Exception as e:
+        await update.message.reply_text(f"خطأ في تشغيل البوت: {str(e)}")
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if active_processes:
-        active_list = "\n".join([f"{name} (🟢 نشط)" for name in active_processes.keys()])
-        await update.message.reply_text(f"📊 الملفات النشطة:\n{active_list}")
-    else:
-        await update.message.reply_text("🔴 لا توجد ملفات نشطة")
-
-async def restart_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    
     if not context.args:
-        await update.message.reply_text("❌ استخدم: /restart <اسم الملف>")
+        await update.message.reply_text("يرجى تحديد اسم ملف البوت\nاستخدام: /stop filename.py")
         return
     
     filename = context.args[0]
     
-    # إيقاف ثم تشغيل
-    if filename in active_processes:
-        await stop_file(update, context)
+    if filename not in active_bots:
+        await update.message.reply_text(f"البوت {filename} غير نشط")
+        return
     
-    await run_file(update, context)
+    try:
+        process = active_bots[filename]
+        process.terminate()
+        process.wait()
+        del active_bots[filename]
+        await update.message.reply_text(f"تم إيقاف البوت: {filename}")
+    except Exception as e:
+        await update.message.reply_text(f"خطأ في إيقاف البوت: {str(e)}")
+
+async def list_bots(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    
+    if not active_bots:
+        await update.message.reply_text("لا توجد بوتات نشطة")
+        return
+    
+    bot_list = "\n".join(active_bots.keys())
+    await update.message.reply_text(f"البوتات النشطة:\n{bot_list}")
+
+async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    
+    if not context.args:
+        await update.message.reply_text("يرجى تحديد اسم ملف البوت\nاستخدام: /restart filename.py")
+        return
+    
+    filename = context.args[0]
+    
+    if filename in active_bots:
+        process = active_bots[filename]
+        process.terminate()
+        process.wait()
+        del active_bots[filename]
+    
+    try:
+        process = subprocess.Popen([sys.executable, filename])
+        active_bots[filename] = process
+        await update.message.reply_text(f"تم إعادة تشغيل البوت: {filename}")
+    except Exception as e:
+        await update.message.reply_text(f"خطأ في إعادة تشغيل البوت: {str(e)}")
+
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    
+    panel_text = """
+🎛️ لوحة الأدمن
+
+الأوامر المتاحة:
+/run filename.py - تشغيل بوت
+/stop filename.py - إيقاف بوت  
+/restart filename.py - إعادة تشغيل بوت
+/list - عرض البوتات النشطة
+/panel - عرض هذه اللوحة
+/stats - إحصائيات النظام
+"""
+    await update.message.reply_text(panel_text)
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    
+    active_count = len(active_bots)
+    stats_text = f"""
+📊 إحصائيات النظام
+
+البوتات النشطة: {active_count}
+المسخدم: @XV_YX
+"""
+    await update.message.reply_text(stats_text)
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # إضافة handlers
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("upload", upload_file))
-    app.add_handler(CommandHandler("list", list_files))
-    app.add_handler(CommandHandler("run", run_file))
-    app.add_handler(CommandHandler("stop", stop_file))
-    app.add_handler(CommandHandler("restart", restart_file))
-    app.add_handler(CommandHandler("delete", delete_file))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(CommandHandler("run", run_bot))
+    app.add_handler(CommandHandler("stop", stop_bot))
+    app.add_handler(CommandHandler("list", list_bots))
+    app.add_handler(CommandHandler("restart", restart_bot))
+    app.add_handler(CommandHandler("panel", admin_panel))
+    app.add_handler(CommandHandler("stats", stats))
     
-    print("🤖 بوت الاستضافة يعمل بدون وقت محدود...")
+    print("البوت الرئيسي يعمل...")
     app.run_polling()
 
 if __name__ == "__main__":
