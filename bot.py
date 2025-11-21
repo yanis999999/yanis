@@ -1,111 +1,183 @@
-import telebot
-from telebot import types
-import requests
-import json
-import uuid
 import os
+import subprocess
+import threading
+import logging
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-BOT_TOKEN = "8430242777:AAF0INzXaCTFGtgVaImCnqkD8gmQ6WZDMnw" #توكنك ياغالي
-droms = telebot.TeleBot(BOT_TOKEN)
+# إعداد التسجيل
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-iid = uuid.uuid4().hex.upper()
+BOT_TOKEN = "8523083737:AAEsO3w-fFbOLT8wRhaItPjb86xA1zEwaj0"
 
-def D():
-    url = "https://api.vulcanlabs.co/smith-auth/api/v1/token"
-    payload = {
-        "device_id": iid,
-        "order_id": "",
-        "product_id": "",
-        "purchase_token": "",
-        "subscription_id": ""
-    }
-    headers = {
-        'User-Agent': "Chat Smith Android, Version 4.0.5(1032)",
-        'Accept': "application/json",
-        'Content-Type': "application/json",
-        'x-vulcan-application-id': "com.smartwidgetlabs.chatgpt"
-    }
-    res = requests.post(url, data=json.dumps(payload), headers=headers).json()
-    return res.get("AccessToken")
+# مجلد التخزين
+UPLOAD_FOLDER = "user_files"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-def KARAR(token, php_code):
-    prompt = f"""
-    أنت مساعد برمجي متخصص. مهمتك: تحويل الكود المرسل من PHP إلى بايثون بدقة كاملة،
-    مع الحفاظ على نفس الوظائف والمنطق. أرجو تقديم الكود النهائي جاهز للاستخدام في بايثون،
-    بدون أي تغييرات في المنطق، وبتنسيق مرتب وواضح.
+# قاموس لتخزين العمليات النشطة
+active_processes = {}
 
-    الكود المرسل من المستخدم:
-    ```php
-    {php_code}
-    ```
-    """
-    url = "https://api.vulcanlabs.co/smith-v2/api/v7/chat_android"
-    payload = {
-        "model": "gpt-4o-mini",
-        "user": iid,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 200000,
-        "nsfw_check": True
-    }
-    headers = {
-        'User-Agent': "Chat Smith Android, Version 4.0.5(1032)",
-        'Accept': "application/json",
-        'Content-Type': "application/json",
-        'x-vulcan-application-id': "com.smartwidgetlabs.chatgpt",
-        'authorization': f"Bearer {token}"
-    }
-    res = requests.post(url, data=json.dumps(payload), headers=headers).json()
-    return res["choices"][0]["Message"]["content"]
-
-token = D()
-
-@droms.message_handler(commands=['start'])
-def welcome_message(message):
-    c = types.InlineKeyboardButton('• Dev •', url='t.me/XV_YX')
-
-    n = types.InlineKeyboardMarkup(row_width=2)
-    n.add(c)
-    droms.send_message(
-        message.chat.id,
-        """<strong>
-👋🏻
--  -  -  -  -  -  -  -  -  -  -  -  -  -  -   -  -
-اهلاً بك عـزيزي في بـوت 
-تحـويل php الـى بايثـون 
-فقط ارسل ملفـك واسـتمتع! 
-</strong>""",
-        reply_markup=n,
-        parse_mode='html'
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 **بوت استضافة ملفات بايثون**\n\n"
+        "📁 **الأوامر:**\n"
+        "/upload - رفع ملف بايثون\n"
+        "/list - عرض الملفات\n"
+        "/run <اسم الملف> - تشغيل ملف\n"
+        "/stop <اسم الملف> - إيقاف ملف\n"
+        "/delete <اسم الملف> - حذف ملف\n"
+        "/status - حالة الملفات النشطة"
     )
 
-@droms.message_handler(content_types=['document'])
-def handle_file(message):
-    file_info = droms.get_file(message.document.file_id)
-    file_name = message.document.file_name
+async def upload_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📤 أرسل ملف بايثون (.py) الآن:")
 
-    if not file_name.endswith(".php"):
-        droms.send_message(message.chat.id, "❌ الرجاء إرسال ملف PHP فقط!")
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    document = update.message.document
+    
+    if document.file_name.endswith('.py'):
+        # تحميل الملف
+        file = await context.bot.get_file(document.file_id)
+        file_path = os.path.join(UPLOAD_FOLDER, document.file_name)
+        
+        await file.download_to_drive(file_path)
+        await update.message.reply_text(f"✅ تم رفع الملف: {document.file_name}")
+    else:
+        await update.message.reply_text("❌ يرجى رفع ملف بايثون فقط (.py)")
+
+async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    files = [f for f in os.listdir(UPLOAD_FOLDER) if f.endswith('.py')]
+    
+    if files:
+        file_list = "\n".join(files)
+        await update.message.reply_text(f"📁 الملفات المتاحة:\n{file_list}")
+    else:
+        await update.message.reply_text("❌ لا توجد ملفات")
+
+async def run_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ استخدم: /run <اسم الملف>")
         return
+    
+    filename = context.args[0]
+    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    
+    if not os.path.exists(file_path):
+        await update.message.reply_text("❌ الملف غير موجود")
+        return
+    
+    if filename in active_processes:
+        await update.message.reply_text("⚠️ الملف يعمل بالفعل")
+        return
+    
+    # تشغيل الملف بدون وقت محدود
+    def run_script():
+        try:
+            process = subprocess.Popen(
+                ['python', file_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            active_processes[filename] = process
+            
+            # انتظار الانتهاء (بدون timeout)
+            stdout, stderr = process.communicate()
+            
+            # تسجيل النتيجة
+            if stdout:
+                logger.info(f"إخراج {filename}: {stdout[:1000]}")
+            if stderr:
+                logger.error(f"أخطاء {filename}: {stderr[:1000]}")
+                
+        except Exception as e:
+            logger.error(f"خطأ في {filename}: {e}")
+        finally:
+            # إزالة من القائمة عند الانتهاء
+            if filename in active_processes:
+                del active_processes[filename]
+    
+    thread = threading.Thread(target=run_script)
+    thread.daemon = True
+    thread.start()
+    
+    await update.message.reply_text(f"🚀 بدأ تشغيل: {filename}")
 
-    downloaded_file = droms.download_file(file_info.file_path)
-    php_code = downloaded_file.decode("utf-8")
+async def stop_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ استخدم: /stop <اسم الملف>")
+        return
+    
+    filename = context.args[0]
+    
+    if filename in active_processes:
+        process = active_processes[filename]
+        try:
+            process.terminate()  # إيقاف العملية
+            process.wait(timeout=5)  # انتظار الإيقاف
+        except:
+            process.kill()  # إجبار الإيقاف إذا لم يستجب
+        
+        del active_processes[filename]
+        await update.message.reply_text(f"⏹️ تم إيقاف: {filename}")
+    else:
+        await update.message.reply_text("❌ الملف غير نشط")
 
-    droms.send_message(message.chat.id, "⏳ جاري تحويل الكود إلى بايثون، يرجى الانتظار...")
+async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ استخدم: /delete <اسم الملف>")
+        return
+    
+    filename = context.args[0]
+    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    
+    if os.path.exists(file_path):
+        # إيقاف الملف إذا كان نشطاً
+        if filename in active_processes:
+            await stop_file(update, context)
+        
+        os.remove(file_path)
+        await update.message.reply_text(f"🗑️ تم حذف: {filename}")
+    else:
+        await update.message.reply_text("❌ الملف غير موجود")
 
-    try:
-        python_code = KARAR(token, php_code)
-        output_file_name = file_name.replace(".php", ".py")
-        with open(output_file_name, "w", encoding="utf-8") as f:
-            f.write(python_code)
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if active_processes:
+        active_list = "\n".join([f"{name} (🟢 نشط)" for name in active_processes.keys()])
+        await update.message.reply_text(f"📊 الملفات النشطة:\n{active_list}")
+    else:
+        await update.message.reply_text("🔴 لا توجد ملفات نشطة")
 
-        with open(output_file_name, "rb") as f:
-            l = types.InlineKeyboardButton('• Dev •', url='t.me/XV_YX')
-            m = types.InlineKeyboardMarkup(row_width=1)
-            m.add(l)
-            droms.send_document(message.chat.id, f, caption='تم ✅', reply_markup=m)
+async def restart_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ استخدم: /restart <اسم الملف>")
+        return
+    
+    filename = context.args[0]
+    
+    # إيقاف ثم تشغيل
+    if filename in active_processes:
+        await stop_file(update, context)
+    
+    await run_file(update, context)
 
-        os.remove(output_file_name)
-    except Exception as e:
-        droms.send_message(message.chat.id, f"❌ حدث خطأ أثناء التحويل: {str(e)}")
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    # إضافة handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("upload", upload_file))
+    app.add_handler(CommandHandler("list", list_files))
+    app.add_handler(CommandHandler("run", run_file))
+    app.add_handler(CommandHandler("stop", stop_file))
+    app.add_handler(CommandHandler("restart", restart_file))
+    app.add_handler(CommandHandler("delete", delete_file))
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    
+    print("🤖 بوت الاستضافة يعمل بدون وقت محدود...")
+    app.run_polling()
 
-droms.polling()
+if __name__ == "__main__":
+    main()
